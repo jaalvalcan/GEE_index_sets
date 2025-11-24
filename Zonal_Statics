@@ -1,0 +1,231 @@
+// ==============================
+// SETUP
+// ==============================
+var roi = blk; // Make sure 'blk' is a valid FeatureCollection asset in your GEE account
+Map.centerObject(roi, 10);
+Map.addLayer(roi, {color: 'black', fillColor: '00000000'}, 'Region of Interest');
+
+// Load and filter Sentinel-2 collection
+var collection = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+  .filterBounds(roi)
+  .filterDate('2023-07-01', '2023-07-30')
+  .filterMetadata('CLOUDY_PIXEL_PERCENTAGE', 'less_than', 20)
+  .map(function(image) {
+    return image
+      .multiply(0.0001)
+      .copyProperties(image, ['system:time_start', 'system:time_end']);
+  });
+
+print('Filtered Sentinel-2 Collection', collection);
+
+// ==============================
+// COMPUTE MEDIAN INDICES
+// ==============================
+
+// --- NDVI ---
+var ndviCollection = collection.map(function(image) {
+  var ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI');
+  return image.addBands(ndvi);
+});
+var ndviMean = ndviCollection.select('NDVI').median().clip(roi);
+
+// --- EVI ---
+var eviCollection = collection.map(function(image) {
+  var evi = image.expression(
+    '2.5 * ((NIR - RED) / (NIR + 6 * RED - 7.5 * BLUE + 1))',
+    {
+      'NIR': image.select('B8'),
+      'RED': image.select('B4'),
+      'BLUE': image.select('B2')
+    }
+  ).rename('EVI');
+  return image.addBands(evi);
+});
+var eviMean = eviCollection.select('EVI').median().clip(roi);
+
+// --- ARVI ---
+var arviCollection = collection.map(function(image) {
+  var arvi = image.expression(
+    '(NIR - (2 * RED) + BLUE) / (NIR + (2 * RED) + BLUE)',
+    {
+      'NIR': image.select('B8'),
+      'RED': image.select('B4'),
+      'BLUE': image.select('B2')
+    }
+  ).rename('ARVI');
+  return image.addBands(arvi);
+});
+var arviMean = arviCollection.select('ARVI').median().clip(roi);
+
+// --- SAVI ---
+var saviCollection = collection.map(function(image) {
+  var nir = image.select('B8');
+  var red = image.select('B4');
+  var L = 0.5;
+  var savi = nir.subtract(red)
+                .divide(nir.add(red).add(L))
+                .multiply(1 + L)
+                .rename('SAVI');
+  return savi;
+});
+var saviMean = saviCollection.select('SAVI').median().clip(roi);
+
+// --- NDGI (Greenness Index) ---
+var ndgiCollection = collection.map(function(image) {
+  var ndgi = image.normalizedDifference(['B3', 'B8']).rename('NDGI');
+  return image.addBands(ndgi);
+});
+var ndgiMean = ndgiCollection.select('NDGI').median().clip(roi);
+
+// --- NDWI (Vegetation Water Content) ---
+var ndwiCollection = collection.map(function(image) {
+  var ndwi = image.normalizedDifference(['B3', 'B8']).rename('NDWI');
+  return image.addBands(ndwi);
+});
+var ndwiMean = ndwiCollection.select('NDWI').median().clip(roi);
+
+// --- RVI ---
+var rviCollection = collection.map(function(image) {
+  var rvi = image.expression(
+    '(NIR / RED)',
+    {
+      'NIR': image.select('B8'),
+      'RED': image.select('B4')
+    }
+  ).rename('RVI');
+  return image.addBands(rvi);
+});
+var rviMean = rviCollection.select('RVI').median().clip(roi);
+
+// --- NDBI (Built-up Index) ---
+var ndbiCollection = collection.map(function(image) {
+  var ndbi = image.expression(
+    '(SWIR - NIR) / (SWIR + NIR)',
+    {
+      'SWIR': image.select('B11'),
+      'NIR': image.select('B8')
+    }
+  ).rename('NDBI');
+  return image.addBands(ndbi);
+});
+var ndbiMean = ndbiCollection.select('NDBI').median().clip(roi);
+
+// ==============================
+// VISUALIZATION PARAMETERS
+// ==============================
+var visParams = {
+  NDVI: {min: -0.2, max: 0.9, palette: ['red', 'white', '00ff00']},
+  EVI:  {min: -0.2, max: 1.0, palette: ['red', 'white', '006600']},
+  ARVI: {min: -0.2, max: 0.9, palette: ['red', 'white', '005500']},
+  SAVI: {min: -0.2, max: 0.6, palette: ['brown', 'yellow', '004400']},
+  NDGI: {min: -0.5, max: 0.5, palette: ['red', 'white', '00aa00']},
+  NDWI: {min: -0.5, max: 0.5, palette: ['orange', 'white', 'blue']},
+  RVI:  {min: 0,   max: 10,  palette: ['white', 'yellow', 'green']},
+  NDBI: {min: -0.5, max: 0.5, palette: ['green', 'white', 'red']}
+};
+
+// ==============================
+// ADD LAYERS TO MAP
+// ==============================
+Map.addLayer(ndviMean, visParams.NDVI, 'NDVI (Median)');
+Map.addLayer(eviMean,  visParams.EVI,  'EVI (Median)');
+Map.addLayer(arviMean, visParams.ARVI, 'ARVI (Median)');
+Map.addLayer(saviMean, visParams.SAVI, 'SAVI (Median)');
+Map.addLayer(ndgiMean, visParams.NDGI, 'NDGI (Median)');
+Map.addLayer(ndwiMean, visParams.NDWI, 'NDWI (Median)');
+Map.addLayer(rviMean,  visParams.RVI,  'RVI (Median)');
+Map.addLayer(ndbiMean, visParams.NDBI, 'NDBI (Median)');
+
+
+
+
+// ==============================
+// EXPORTS (unchanged from your original)
+// ==============================
+Export.table.toDrive({
+  collection: saviMean.reduceRegions({
+    collection: roi,
+    reducer: ee.Reducer.median(),
+    scale: 10
+  }),
+  description: 'SAVI_Mean_m',
+  fileFormat: 'CSV',
+  folder: 'GEE_MEDIAN_JUNE'
+});
+
+Export.table.toDrive({
+  collection: ndviMean.reduceRegions({
+    collection: roi,
+    reducer: ee.Reducer.median(),
+    scale: 10
+  }),
+  description: 'NDVI_Mean_m',
+  fileFormat: 'CSV',
+  folder: 'GEE_MEDIAN_JUNE'
+});
+
+Export.table.toDrive({
+  collection: eviMean.reduceRegions({
+    collection: roi,
+    reducer: ee.Reducer.median(),
+    scale: 10
+  }),
+  description: 'EVI_Mean_m',
+  fileFormat: 'CSV',
+  folder: 'GEE_MEDIAN_JUNE'
+});
+
+Export.table.toDrive({
+  collection: arviMean.reduceRegions({
+    collection: roi,
+    reducer: ee.Reducer.median(),
+    scale: 10
+  }),
+  description: 'ARVI_Mean_m',
+  fileFormat: 'CSV',
+  folder: 'GEE_MEDIAN_JUNE'
+});
+
+Export.table.toDrive({
+  collection: ndgiMean.reduceRegions({
+    collection: roi,
+    reducer: ee.Reducer.median(),
+    scale: 10
+  }),
+  description: 'NDGI_Mean_m',
+  fileFormat: 'CSV',
+  folder: 'GEE_MEDIAN_JUNE'
+});
+
+Export.table.toDrive({
+  collection: ndwiMean.reduceRegions({
+    collection: roi,
+    reducer: ee.Reducer.median(),
+    scale: 10
+  }),
+  description: 'NDWI_Mean_m',
+  fileFormat: 'CSV',
+  folder: 'GEE_MEDIAN_JUNE'
+});
+
+Export.table.toDrive({
+  collection: rviMean.reduceRegions({
+    collection: roi,
+    reducer: ee.Reducer.median(),
+    scale: 10
+  }),
+  description: 'RVI_Mean_m',
+  fileFormat: 'CSV',
+  folder: 'GEE_MEDIAN_JUNE'
+});
+
+Export.table.toDrive({
+  collection: ndbiMean.reduceRegions({
+    collection: roi,
+    reducer: ee.Reducer.median(),
+    scale: 10
+  }),
+  description: 'NDBI_Mean_m',
+  fileFormat: 'CSV',
+  folder: 'GEE_MEDIAN_JUNE'
+});
