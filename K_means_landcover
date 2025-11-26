@@ -1,1 +1,201 @@
+import ee
+import geemap
+import numpy as np
+import matplotlib.pyplot as plt
+ee.Authenticate()  # Run once if not authenticated
+ee.Initialize(project='ee-jjjj')
+Map = geemap.Map(basemap='SATELLITE')
+Map.addLayerControl()
+Map
+# Get the last drawn feature as your AOI
+aoi = Map.draw_last_feature.geometry()
+
+# Load 2024 embedding data
+embedding_col = ee.ImageCollection("GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL") \
+    .filterDate('2024-01-01', '2024-12-31') \
+    .filterBounds(aoi)
+
+image_count = embedding_col.size().getInfo()
+print(f"Found {image_count} images for 2024")
+
+if image_count == 0:
+    raise ValueError("No images found for 2024. Check date range and AOI.")
+
+# Get the image and clip to AOI
+embedding_img = embedding_col.first().clip(aoi)
+
+# The actual band names are A00, A01, ..., A63 as indicated by the error message.
+# Let's dynamically get all available bands first, then select the relevant ones.
+all_available_bands = embedding_img.bandNames().getInfo()
+
+# Filter for bands starting with 'A' and take the first 20 for clustering
+# Assuming 'A00', 'A01', etc. are the embedding bands
+selected_bands = [b for b in all_available_bands if b.startswith('A')][:20]
+
+# Ensure we actually have bands to select
+if not selected_bands:
+    raise ValueError("Could not find any 'AXX' bands in the embedding image.")
+
+print(f"Using {len(selected_bands)} bands for clustering: {selected_bands}")
+
+# Create a new image with just the selected bands
+selected_img = embedding_img.select(selected_bands)
+
+# Calculate area to determine appropriate sample size
+area_km2 = aoi.area(ee.ErrorMargin(1, 'meters')).divide(1e6).getInfo()
+sample_size = min(15000, max(3000, int(area_km2 * 30)))  # 30 samples per km²
+print(f"Sampling {sample_size:,} pixels for clustering at 10m resolution")
+
+# Sample the selected bands
+training_samples = selected_img.sample(
+    region=aoi,
+    scale=10,  # 10m resolution
+    numPixels=sample_size,
+    seed=42,
+    geometries=True
+)
+
+# Convert to FeatureCollection
+training_fc = ee.FeatureCollection(training_samples)
+print(f"Successfully sampled {training_fc.size().getInfo()} pixels")
+
+# Define number of land cover classes
+NUM_CLASSES = 8
+print(f"Training K-means clusterer with {NUM_CLASSES} classes...")
+
+# Train the clusterer
+clusterer = ee.Clusterer.wekaKMeans(
+    NUM_CLASSES,
+    maxIterations=100
+).train(
+    features=training_fc,
+    inputProperties=selected_bands
+)
+
+# Apply clustering to the full image
+clustered_img = selected_img.cluster(clusterer).rename('cluster_id')
+
+# Add to map with categorical palette
+cluster_palette = ['2ca02c', '1f77b4', 'ff7f0e', 'd62728', '9467bd',
+                  '8c564b', 'e377c2', '7f7f7f', 'bcbd22', '17becf']
+Map.addLayer(
+    clustered_img,
+    {'min': 0, 'max': NUM_CLASSES-1, 'palette': cluster_palette[:NUM_CLASSES]},
+    f'Land Cover Clusters ({NUM_CLASSES} classes)',
+    True
+)
+display(Map)
+
+# Apply spatial refinement (majority filter)
+print("Applying spatial refinement to clean noise...")
+
+# Apply focal mode twice for better smoothing
+# The focal_mode method expects a radius (float) directly, not an ee.Kernel object.
+# A radius of 1 creates a 3x3 neighborhood (1 pixel out from center).
+refined_clusters = clustered_img.focal_mode(1, iterations=2).rename('refined_cluster')
+
+# Add refined layer to map
+Map.addLayer(
+    refined_clusters,
+    {'min': 0, 'max': NUM_CLASSES-1, 'palette': cluster_palette[:NUM_CLASSES]},
+    f'Refined Land Cover ({NUM_CLASSES} classes)',
+    False
+)
+display(Map)
+
+# Calculate area statistics by class
+print("\nCalculating area statistics by land cover class...")
+
+# Add pixel area band
+pixel_area = ee.Image.pixelArea().rename('area')
+# Ensure 'area' is the first band and 'refined_cluster' is the second
+# so that ee.Reducer.sum().group(groupField=1) sums 'area' and groups by 'refined_cluster'.
+clustered_with_area = pixel_area.addBands(refined_clusters)
+
+# Calculate area by class
+# With 'area' as the first band (index 0) and 'refined_cluster' as the second (index 1),
+# groupField=1 correctly groups by 'refined_cluster' and sums the first band ('area').
+area_stats = clustered_with_area.reduceRegion(
+    reducer=ee.Reducer.sum().group(
+        groupField=1,  # Refers to the 'refined_cluster' band (second input)
+        groupName='class'
+    ),
+    geometry=aoi,
+    scale=10,
+    maxPixels=1e13
+)
+
+# Get and format results
+class_areas = area_stats.get('groups').getInfo()
+total_area = aoi.area(ee.ErrorMargin(1, 'meters')).getInfo()
+
+print("\nLand Cover Class Distribution:")
+print("-" * 50)
+for group in class_areas:
+    class_id = group['class']
+    area_m2 = group['sum']
+    area_ha = area_m2 / 10000
+    percentage = (area_m2 / total_area) * 100
+    print(f"Class {class_id}: {area_ha:,.1f} ha ({percentage:.1f}%)")
+
+ First, let's create a more informative legend with area statistics
+print("\n📊 Creating map visualization with legend...")
+
+# Convert area statistics to a more usable format
+class_areas_dict = {}
+for group in class_areas:
+    class_id = int(group['class'])
+    area_m2 = group['sum']
+    area_ha = area_m2 / 10000
+    percentage = (area_m2 / total_area) * 100
+    class_areas_dict[class_id] = {
+        'area_ha': area_ha,
+        'percentage': percentage
+    }
+
+# Create class labels with area information
+class_labels = []
+for class_id in range(NUM_CLASSES):
+    if class_id in class_areas_dict:
+        area_info = class_areas_dict[class_id]
+        # Create descriptive labels based on typical UK land cover patterns
+        class_names = [
+            "Dense Forest/Woodland",
+            "Agricultural Land",
+            "Urban/Built-up",
+            "Water Bodies",
+            "Grassland/Pasture",
+            "Wetlands",
+            "Scrubland",
+            "Bare Soil/Rock"
+        ]
+        label = f"{class_names[class_id]} ({area_info['area_ha']:,.0f} ha, {area_info['percentage']:.1f}%)"
+    else:
+        label = f"Class {class_id} (0 ha, 0.0%)"
+    class_labels.append(label)
+
+# Add the refined clusters to map with proper legend
+Map.addLayer(
+    refined_clusters,
+    {'min': 0, 'max': NUM_CLASSES-1, 'palette': cluster_palette[:NUM_CLASSES]},
+    'Land Cover Classification',
+    True
+)
+
+# Add a custom legend directly using Map.add_legend
+Map.add_legend(
+    title="Land Cover Classes (2024)",
+    labels=class_labels,
+    colors=cluster_palette[:NUM_CLASSES],
+    position="bottomright"
+)
+
+# Add AOI boundary for context
+Map.addLayer(aoi, {'color': 'black', 'fillColor': '00000000', 'width': 2}, 'Study Area Boundary')
+
+print("✅ Map visualization with legend created successfully")
+display(Map)
+
+
+
 
