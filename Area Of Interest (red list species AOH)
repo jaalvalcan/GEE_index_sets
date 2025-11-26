@@ -1,0 +1,238 @@
+/*************************************************************
+ * AOH visualisation + WorldCover legend + EOO from validated occurrences
+ * Uses your assets:
+ *   - projects/ee-jaalvalcan/assets/AOH_LAYER
+ *   - projects/ee-jaalvalcan/assets/MAGNOLIAS_points
+ *************************************************************/
+
+// -----------------------------------------------------------
+// 0) Assets / Aliases
+var AOH_LAYER = ee.FeatureCollection('projects/ee-jaalvalcan/assets/EOO_WGS84_CONVEX');
+var MAGNOLIAS_points = ee.FeatureCollection('projects/ee-jaalvalcan/assets/MAGNOLIAS_points');
+
+var range = AOH_LAYER;          // Polygon(s) of species range
+var occ   = MAGNOLIAS_points;   // Occurrence points (with geometry)
+
+// -----------------------------------------------------------
+// 1) WORLD COVER (v200) — ImageCollection → single Image (band 'Map')
+var wc2021 = ee.ImageCollection('ESA/WorldCover/v200').first().select('Map');
+
+// Official class codes & palette (v200)
+var wcCodes   = [10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100];
+var wcPalette = [
+  '#006400', // 10 Tree cover
+  '#ffbb22', // 20 Shrubland
+  '#ffff4c', // 30 Grassland
+  '#f096ff', // 40 Cropland
+  '#fa0000', // 50 Built-up
+  '#b4b4b4', // 60 Bare/sparse vegetation
+  '#f0f0f0', // 70 Snow & ice
+  '#0064c8', // 80 Permanent water bodies
+  '#0096a0', // 90 Herbaceous wetland
+  '#00cf75', // 95 Mangroves
+  '#fae6a0'  // 100 Moss & lichen
+];
+// Remap categorical classes to a sequential 0..10 index for proper palette display
+var wcRemap = wc2021.remap(wcCodes, ee.List.sequence(0, 10));
+
+// Habitat mask for AOH (adjust per your IUCN ↔ WorldCover crosswalk)
+var habitatCodes = [10];  // 10 = Tree cover. Add others if appropriate
+var habitatMask = wc2021
+  .remap(habitatCodes, ee.List.repeat(1, habitatCodes.length), 0)
+  .eq(1)
+  .selfMask();
+
+// -----------------------------------------------------------
+// 2) ELEVATION (Copernicus DEM GLO-30) — ImageCollection → mosaic
+var dem = ee.ImageCollection('COPERNICUS/DEM/GLO30').mosaic().select('DEM');
+
+// Altitude filter (adjust to your species)
+var minElev = 0;     // metres
+var maxElev = 600;   // metres
+var elevMask = dem.gte(minElev).and(dem.lte(maxElev));
+
+// -----------------------------------------------------------
+// 3) AOH PRELIMINARY = Range ∩ Habitat ∩ Altitude
+var aohMask = habitatMask.and(elevMask).selfMask().clip(range);
+
+// -----------------------------------------------------------
+// 4) Map visualisation
+Map.centerObject(range, 10.8);
+
+// Range outline (black; change to 'red' if you prefer)
+Map.addLayer(
+  range.style({color: 'black', fillColor: '00000000', width: 2}),
+  {},
+  'Range (AOH_LAYER)'
+);
+
+// WorldCover (categorical backdrop, using palette)
+Map.addLayer(
+  wcRemap.clip(range),
+  {min: 0, max: 10, palette: wcPalette},
+  'WorldCover 2021 (classes)'
+);
+
+// Elevation band (context only)
+Map.addLayer(
+  dem.updateMask(elevMask).clip(range),
+  {min: minElev, max: maxElev},
+  'Elevation band (min–max)'
+);
+
+// AOH preliminary (solid orange, no transparency)
+var aohSolid = ee.Image.constant(1).updateMask(aohMask);
+Map.addLayer(
+  aohSolid,
+  {palette: ['#FFA500']},  // orange
+  'AOH preliminary (orange)'
+);
+
+// Occurrence points
+Map.addLayer(
+  occ.style({color: 'blue', pointSize: 4, pointShape: 'circle'}),
+  {},
+  'Occurrences (points)'
+);
+
+// -----------------------------------------------------------
+// 5) VALIDATION: which occurrences fall inside the AOH?
+var aoh01 = aohMask.unmask(0).rename('AOH01');
+var occSample = aoh01.sampleRegions({
+  collection: occ,
+  properties: [],
+  scale: 10,
+  geometries: true
+});
+var occInside = occSample.filter(ee.Filter.eq('AOH01', 1));
+var occOutside = occSample.filter(ee.Filter.eq('AOH01', 0));
+
+// -----------------------------------------------------------
+// 6) EOO (convex hull) from VALIDATED occurrences (inside AOH)
+// If <3 validated points, fall back to all occurrences
+var occForEOO = ee.FeatureCollection(ee.Algorithms.If(occInside.size().gt(2), occInside, occ));
+var eooGeom   = occForEOO.geometry().convexHull(100); // ~100 m tolerance
+var eooFeat   = ee.Feature(eooGeom, {name: 'EOO'});
+
+// Style EOO: red outline, no fill
+var eooStyled = ee.FeatureCollection([eooFeat]).style({
+  color: 'red',
+  width: 2,
+  fillColor: '00000000'
+});
+Map.addLayer(eooStyled, {}, 'EOO — encompassing validated occurrences');
+
+// Compute EOO area (km²)
+var eooAreaKm2 = ee.Number(eooGeom.area(1)).divide(1e6);
+
+// -----------------------------------------------------------
+// 7) Quick info in Console (no exports)
+print('WorldCover v200 (first image):', wc2021);
+print('DEM (mosaic) projection:', dem.projection());
+print('Range features:', range.size());
+print('Occurrences count:', occ.size());
+
+// AOH area in km² — informative
+var pixelAreaKm2 = ee.Image.pixelArea().divide(1e6);
+var aohAreaKm2 = pixelAreaKm2.updateMask(aohMask).reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: range.geometry(),
+  scale: 30,                   
+  maxPixels: 1e12
+});
+print('AOH area (km²):', aohAreaKm2.get('area'));
+print('Validated occurrences (inside AOH):', occInside.size());
+print('EOO area (km²):', eooAreaKm2);
+
+// -----------------------------------------------------------
+// 8) LEGEND (WorldCover palette + AOH + EOO with area + Stats)
+var legend = ui.Panel({
+  style: {
+    position: 'bottom-left',
+    padding: '8px 10px',
+    backgroundColor: 'white'
+  }
+});
+
+// --- Título ---
+legend.add(ui.Label({
+  value: 'Legend',
+  style: {fontWeight: 'bold', fontSize: '13px', margin: '0 0 6px 0'}
+}));
+
+// --- Función para filas de color + texto ---
+function makeRow(color, name) {
+  var colorBox = ui.Label('', {
+    backgroundColor: color,
+    padding: '8px',
+    margin: '0 6px 4px 0',
+    border: '1px solid #555'
+  });
+  var desc = ui.Label(name, {margin: '0 0 4px 0'});
+  return ui.Panel([colorBox, desc], ui.Panel.Layout.Flow('horizontal'));
+}
+
+// --- Clases WorldCover ---
+var wcNames = [
+  'Tree cover (10)',
+  'Shrubland (20)',
+  'Grassland (30)',
+  'Cropland (40)',
+  'Built-up (50)',
+  'Bare/sparse veg. (60)',
+  'Snow & ice (70)',
+  'Permanent water (80)',
+  'Herbaceous wetland (90)',
+  'Mangroves (95)',
+  'Moss & lichen (100)'
+];
+for (var i = 0; i < wcPalette.length; i++) {
+  legend.add(makeRow(wcPalette[i], wcNames[i]));
+}
+
+// --- AOH (orange) ---
+legend.add(makeRow('#FFA500', 'AOH (Range ∩ Habitat ∩ Altitude)'));
+
+// --- EOO entry with computed area ---
+var eooLabel = ui.Label({
+  value: 'EOO — encompassing validated occurrences (area: … km²)',
+  style: {margin: '6px 0 0 0', fontWeight: 'normal'}
+});
+legend.add(eooLabel);
+
+// Actualizar etiqueta del EOO
+eooAreaKm2.evaluate(function(val){
+  var txt = 'EOO — encompassing validated occurrences (area: ' +
+            (val ? val.toFixed(2) : '0.00') + ' km²)';
+  eooLabel.setValue(txt);
+});
+
+// -----------------------------------------------------------
+// 🔹 Extra: estadísticas mostradas dentro de la leyenda
+legend.add(ui.Label({
+  value: 'Statistics',
+  style: {fontWeight: 'bold', fontSize: '13px', margin: '8px 0 4px 0'}
+}));
+
+// Preparar labels vacíos para rellenar cuando se evalúen los valores
+var lblRange = ui.Label('Range features: …');
+var lblOcc   = ui.Label('Occurrences: …');
+var lblValOcc= ui.Label('Validated occurrences: …');
+var lblAOH   = ui.Label('AOH area: … km²');
+
+legend.add(lblRange);
+legend.add(lblOcc);
+legend.add(lblValOcc);
+legend.add(lblAOH);
+
+// Evaluar y mostrar valores reales
+range.size().evaluate(function(val){ lblRange.setValue('Range features: ' + val); });
+occ.size().evaluate(function(val){ lblOcc.setValue('Occurrences: ' + val); });
+occInside.size().evaluate(function(val){ lblValOcc.setValue('Validated occurrences: ' + val); });
+aohAreaKm2.get('area').evaluate(function(val){
+  lblAOH.setValue('AOH area: ' + (val ? val.toFixed(2) : '0.00') + ' km²');
+});
+
+// -----------------------------------------------------------
+// 🔹 Add legend directly to the MAP
+Map.add(legend);
