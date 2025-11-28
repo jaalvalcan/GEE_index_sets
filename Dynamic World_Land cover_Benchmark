@@ -1,0 +1,400 @@
+import ee
+import geemap
+import json
+import geopandas as gpd
+import  fiona
+# Initialize Earth Engine and map
+ee.Authenticate()
+ee.Initialize(project='ee-jaaaaa')
+
+map = geemap.Map(basemap = 'SATELLITE', ee_initialize=False)
+map
+
+roi = map.draw_last_feature.geometry()
+
+roi
+
+
+# Define the time period for 2020
+start_date = '2020-01-01'
+end_date = '2020-12-31'
+
+print("🌍 LOADING DYNAMIC WORLD 2020...")
+
+# Load Dynamic World collection
+dw_collection = ee.ImageCollection('GOOGLE/DYNAMICWORLD/V1')
+
+# Filter for 2020 and your ROI
+dw_2020 = dw_collection.filterDate(start_date, end_date).filterBounds(roi)
+
+print(f"📊 Found {dw_2020.size().getInfo()} Dynamic World images for 2020")
+
+# Create a composite (most frequent class) for 2020
+dw_composite = dw_2020.select('label').mode()
+
+# Clip to your ROI
+dw_clipped = dw_composite.clip(roi)
+
+print("✅ Dynamic World 2020 composite created and clipped to ROI")
+
+# Dynamic World class definitions and colors
+dw_classes = {
+    0: {'name': 'Water', 'color': '419BDF'},
+    1: {'name': 'Trees', 'color': '397D49'},
+    2: {'name': 'Grass', 'color': '88B053'},
+    3: {'name': 'Flooded_Vegetation', 'color': '7A87C6'},
+    4: {'name': 'Crops', 'color': 'E49635'},
+    5: {'name': 'Shrub_Scrub', 'color': 'DFC35A'},
+    6: {'name': 'Built', 'color': 'C4281B'},
+    7: {'name': 'Bare', 'color': 'A59B8F'},
+    8: {'name': 'Snow_Ice', 'color': 'B39FE1'}
+}
+
+print("🌳 DYNAMIC WORLD CLASSES:")
+for code, info in dw_classes.items():
+    print(f"   {code}: {info['name']} ({info['color']})")
+
+# Create visualization parameters
+dw_vis_params = {
+    'min': 0,
+    'max': 8,
+    'palette': [info['color'] for info in dw_classes.values()]
+}
+
+# Create a new map
+Map = geemap.Map(center=[14.0, -83.5], zoom=10)  # Adjust center based on your ROI
+Map.addLayerControl()
+
+print("🗺️ DISPLAYING DYNAMIC WORLD 2020...")
+
+# Add Dynamic World to the map
+Map.addLayer(dw_clipped, dw_vis_params, 'Dynamic World 2020')
+
+# Add ROI boundary
+Map.addLayer(roi, {'color': 'yellow', 'width': 3}, 'ROI Boundary')
+
+# Center map on ROI
+Map.centerObject(roi, 10)
+
+print("✅ Dynamic World 2020 displayed successfully!")
+print("🔍 Zoom in to inspect the land cover classification")
+
+# Display the map
+Map
+
+def add_dw_legend(Map):
+    """Add a legend for Dynamic World classes"""
+    
+    # Create legend dictionary
+    legend_dict = {}
+    for code, info in dw_classes.items():
+        legend_dict[info['name']] = '#' + info['color']
+    
+    Map.add_legend(
+        title="Dynamic World Classes",
+        legend_dict=legend_dict,
+        position='bottomright'
+    )
+    print("✅ Legend added to map")
+
+def get_dw_statistics(dw_image, roi):
+    """Get basic statistics about the Dynamic World classification"""
+    
+    print("\n📊 CALCULATING CLASS STATISTICS...")
+    
+    # Calculate area for each class
+    area_image = ee.Image.pixelArea().addBands(dw_image)
+    
+    area_stats = area_image.reduceRegion(
+        reducer=ee.Reducer.sum().group(
+            groupField=1,
+            groupName='class_code'
+        ),
+        geometry=roi,
+        scale=10,
+        maxPixels=1e9
+    )
+    
+    stats = area_stats.getInfo()
+    
+    print("📈 CLASS DISTRIBUTION IN YOUR ROI:")
+    print("-" * 40)
+    
+    total_area = 0
+    class_areas = {}
+    
+    if 'groups' in stats:
+        for group in stats['groups']:
+            class_code = group['class_code']
+            area_sq_m = group['sum']
+            area_hectares = area_sq_m / 10000
+            
+            class_name = dw_classes[class_code]['name']
+            class_areas[class_name] = area_hectares
+            total_area += area_hectares
+            
+            print(f"{class_name:20}: {area_hectares:8.1f} ha")
+    
+    print("-" * 40)
+    print(f"{'TOTAL':20}: {total_area:8.1f} ha")
+    
+    return class_areas
+
+# Add legend to map
+add_dw_legend(Map)
+
+# Get statistics
+class_areas = get_dw_statistics(dw_clipped, roi)
+
+# Load ESA WorldCover 2020
+print("🌍 LOADING ESA WORLDCOVER 2020...")
+
+# ESA WorldCover 2020 dataset
+esa_worldcover = ee.ImageCollection("ESA/WorldCover/v100").first()
+
+# Clip to your ROI
+esa_clipped = esa_worldcover.clip(roi)
+
+print("✅ ESA WorldCover 2020 loaded and clipped to ROI")
+
+# ESA WorldCover class definitions and colors
+esa_classes = {
+    10: {'name': 'Trees', 'color': '006400'},
+    20: {'name': 'Shrubland', 'color': 'FFBB22'},
+    30: {'name': 'Grassland', 'color': 'FFFF4C'},
+    40: {'name': 'Cropland', 'color': 'F096FF'},
+    50: {'name': 'Built', 'color': 'FA0000'},
+    60: {'name': 'Bare', 'color': 'B4B4B4'},
+    70: {'name': 'Snow_Ice', 'color': 'F0F0F0'},
+    80: {'name': 'Water', 'color': '0064C8'},
+    90: {'name': 'Wetlands', 'color': '0096A0'},
+    95: {'name': 'Mangroves', 'color': '00CF75'},
+    100: {'name': 'Moss_Lichen', 'color': 'FAE6A0'}
+}
+
+print("🌳 ESA WORLDCOVER CLASSES:")
+for code, info in esa_classes.items():
+    print(f"   {code}: {info['name']} ({info['color']})")
+
+# Create visualization parameters for ESA WorldCover
+esa_vis_params = {
+    'min': 10,
+    'max': 100,
+    'palette': [info['color'] for info in esa_classes.values()]
+}
+
+# Clear previous layers and create new map
+Map = geemap.Map(center=[14.0, -83.5], zoom=10)
+Map.addLayerControl()
+
+print("🗺️ DISPLAYING BOTH DATASETS...")
+
+# Add Dynamic World 2020
+Map.addLayer(dw_clipped, dw_vis_params, 'Dynamic World 2020')
+
+# Add ESA WorldCover 2020
+Map.addLayer(esa_clipped, esa_vis_params, 'ESA WorldCover 2020')
+
+# Add ROI boundary
+Map.addLayer(roi, {'color': 'yellow', 'width': 3}, 'ROI Boundary')
+
+# Center map on ROI
+Map.centerObject(roi, 10)
+
+print("✅ Both datasets displayed successfully!")
+
+def add_comparison_legends(Map):
+    """Add legends for both Dynamic World and ESA WorldCover"""
+    
+    # Dynamic World legend
+    dw_legend_dict = {}
+    for code, info in dw_classes.items():
+        dw_legend_dict[info['name']] = '#' + info['color']
+    
+    # ESA WorldCover legend
+    esa_legend_dict = {}
+    for code, info in esa_classes.items():
+        esa_legend_dict[info['name']] = '#' + info['color']
+    
+    # Add legends to different positions
+    Map.add_legend(
+        title="Dynamic World Classes",
+        legend_dict=dw_legend_dict,
+        position='bottomright'
+    )
+    
+    Map.add_legend(
+        title="ESA WorldCover Classes", 
+        legend_dict=esa_legend_dict,
+        position='bottomleft'
+    )
+    
+    print("✅ Both legends added to map")
+
+# Add legends
+add_comparison_legends(Map)
+
+def get_comparative_statistics(dw_image, esa_image, roi):
+    """Get comparative statistics between Dynamic World and ESA WorldCover"""
+    
+    print("\n📊 COMPARATIVE STATISTICS")
+    print("=" * 60)
+    
+    # Calculate areas for both datasets
+    def calculate_areas(image, classes_dict, dataset_name):
+        area_image = ee.Image.pixelArea().addBands(image)
+        
+        area_stats = area_image.reduceRegion(
+            reducer=ee.Reducer.sum().group(
+                groupField=1,
+                groupName='class_code'
+            ),
+            geometry=roi,
+            scale=10,
+            maxPixels=1e9
+        )
+        
+        stats = area_stats.getInfo()
+        class_areas = {}
+        total_area = 0
+        
+        if 'groups' in stats:
+            for group in stats['groups']:
+                class_code = group['class_code']
+                area_sq_m = group['sum']
+                area_hectares = area_sq_m / 10000
+                
+                class_name = classes_dict[class_code]['name']
+                class_areas[class_name] = area_hectares
+                total_area += area_hectares
+        
+        return class_areas, total_area
+    
+    # Calculate areas for both datasets
+    dw_areas, dw_total = calculate_areas(dw_image, dw_classes, "Dynamic World")
+    esa_areas, esa_total = calculate_areas(esa_image, esa_classes, "ESA WorldCover")
+    
+    # Print comparison table
+    print("\n🏞️  AREA COMPARISON (hectares)")
+    print("-" * 50)
+    print(f"{'CLASS':<25} {'DYNAMIC WORLD':<15} {'ESA WORLDCOVER':<15}")
+    print("-" * 50)
+    
+    # Get all unique class names from both datasets
+    all_classes = set(list(dw_areas.keys()) + list(esa_areas.keys()))
+    
+    for class_name in sorted(all_classes):
+        dw_area = dw_areas.get(class_name, 0)
+        esa_area = esa_areas.get(class_name, 0)
+        print(f"{class_name:<25} {dw_area:<15.1f} {esa_area:<15.1f}")
+    
+    print("-" * 50)
+    print(f"{'TOTAL':<25} {dw_total:<15.1f} {esa_total:<15.1f}")
+    
+    return dw_areas, esa_areas
+
+# Get comparative statistics
+dw_areas, esa_areas = get_comparative_statistics(dw_clipped, esa_clipped, roi)
+
+def calculate_agreement(dw_image, esa_image, roi):
+    """Calculate agreement and disagreement between the two datasets"""
+
+    print("\n\U0001f50d AGREEMENT ANALYSIS")
+    print("=" * 50)
+
+    # Create agreement map (1 where classes match, 0 where they don't)
+    agreement = dw_image.eq(esa_image)
+
+    # Calculate agreement statistics
+    agreement_stats = agreement.reduceRegion(
+        reducer=ee.Reducer.mean(),
+        geometry=roi,
+        scale=10,
+        maxPixels=1e9
+    )
+
+    agreement_percent = agreement_stats.getInfo().get('label', 0) * 100
+
+    print(f"\U0001f4c8 OVERALL AGREEMENT: {agreement_percent:.1f}%")
+    print(f"\U0001f4c9 DISAGREEMENT: {100 - agreement_percent:.1f}%")
+
+    # Create disagreement map for visualization
+    disagreement = agreement.eq(0).selfMask()
+
+    return agreement, disagreement, agreement_percent
+
+# Calculate agreement
+agreement, disagreement, agreement_percent = calculate_agreement(dw_clipped, esa_clipped, roi)
+
+
+# Add disagreement layer to highlight differences
+print("\n🎨 ADDING DISAGREEMENT LAYER...")
+
+# Add disagreement areas in red
+Map.addLayer(
+    disagreement, 
+    {'palette': ['FF0000'], 'min': 0, 'max': 1}, 
+    'Disagreement Areas'
+)
+
+print("✅ Disagreement layer added (red areas show where classifications differ)")
+
+def print_comparative_summary(dw_areas, esa_areas, agreement_percent):
+    """Print final comparative summary"""
+    
+    print("\n" + "="*70)
+    print("🎯 COMPARATIVE ANALYSIS SUMMARY")
+    print("="*70)
+    
+    print(f"\n📅 DATASETS COMPARED:")
+    print(f"   • Dynamic World 2020")
+    print(f"   • ESA WorldCover 2020")
+    
+    print(f"\n📊 KEY METRICS:")
+    print(f"   • Overall Agreement: {agreement_percent:.1f}%")
+    print(f"   • Disagreement: {100 - agreement_percent:.1f}%")
+    
+    print(f"\n🌳 MAJOR CLASSES (Dynamic World):")
+    dw_sorted = sorted(dw_areas.items(), key=lambda x: x[1], reverse=True)[:3]
+    for class_name, area in dw_sorted:
+        percentage = (area / sum(dw_areas.values())) * 100
+        print(f"   • {class_name}: {area:.1f} ha ({percentage:.1f}%)")
+    
+    print(f"\n🏠 MAJOR CLASSES (ESA WorldCover):")
+    esa_sorted = sorted(esa_areas.items(), key=lambda x: x[1], reverse=True)[:3]
+    for class_name, area in esa_sorted:
+        percentage = (area / sum(esa_areas.values())) * 100
+        print(f"   • {class_name}: {area:.1f} ha ({percentage:.1f}%)")
+    
+    print(f"\n🔍 INTERPRETATION GUIDE:")
+    print(f"   • Toggle layers on/off to compare visually")
+    print(f"   • Red areas show where the datasets disagree")
+    print(f"   • Check if disagreement occurs in mixed/transition areas")
+    print(f"   • Consider which classification better matches local knowledge")
+
+# Print final summary
+print_comparative_summary(dw_areas, esa_areas, agreement_percent)
+
+# Display the final map
+print("\n📍 DISPLAYING COMPARATIVE MAP...")
+Map
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
