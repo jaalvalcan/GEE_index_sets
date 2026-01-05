@@ -1,0 +1,451 @@
+{
+  "cells": [
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "# New Notebook\n",
+        "\n",
+        "Welcome to your new Jupyter notebook!"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "import ee\n",
+        "import geemap\n",
+        "import geopandas as gpd\n",
+        "import pandas as pd\n",
+        "import json\n",
+        "from pathlib import Path"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "ee.Initialize(project='....')"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "grid_path = '/Users/javiervaldes/Documents/2026/exercices/Mexico_Zonal_statics/grid.geojson'\n",
+        ""
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "# Read the GeoJSON file\n",
+        "with open(grid_path, 'r') as f:\n",
+        "    grid_geojson = json.load(f)"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "# Convert to GeoDataFrame to work with geometries\n",
+        "grid_gdf = gpd.read_file(grid_path)\n",
+        ""
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "# Display grid information\n",
+        "print(f\"Grid loaded successfully!\")\n",
+        "print(f\"Number of grid cells: {len(grid_gdf)}\")\n",
+        "print(f\"Grid CRS: {grid_gdf.crs}\")\n",
+        "print(grid_gdf.head())"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "# Cell 4: Define Study Area and Date Range\n",
+        "# Using the bounds of the grid for image collection filtering\n",
+        "# total_bounds returns [minx, miny, maxx, maxy]\n",
+        "study_area = ee.Geometry.BBox(west=bounds[0], south=bounds[1], east=bounds[2], north=bounds[3])"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "# Define date range\n",
+        "start_date = '2024-01-01'\n",
+        "end_date = '2024-12-31'\n",
+        "cloud_threshold = 10  # Filter images with less than 10% cloud cover\n",
+        "print(f\"Study area bounds: {bounds}\")\n",
+        "print(f\"Date range: {start_date} to {end_date}\")"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "# Cell 5: Filter Sentinel-2 Image Collection\n",
+        "collection = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')\n",
+        "              .filterBounds(study_area)\n",
+        "              .filterDate(start_date, end_date)\n",
+        "              .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', cloud_threshold)))\n",
+        "\n",
+        "print(f\"Number of images in collection: {collection.size().getInfo()}\")"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "# Get median composite\n",
+        "image = collection.median()\n",
+        "print(\"Median composite created successfully!\")"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "# Cell 6: Extract and Scale Sentinel-2 Bands\n",
+        "# Sentinel-2 Level-2A data is scaled by 10,000\n",
+        "# Extract individual bands\n",
+        "B2 = image.select('B2').multiply(0.0001)  # Blue - scaled to 0-1\n",
+        "B4 = image.select('B4').multiply(0.0001)  # Red - scaled to 0-1\n",
+        "B8 = image.select('B8').multiply(0.0001)  # NIR - scaled to 0-1\n",
+        "print(\"Bands extracted and scaled successfully!\")\n",
+        ""
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "# Cell 7: Calculate NDVI (Normalized Difference Vegetation Index)\n",
+        "# Formula: NDVI = (NIR - RED) / (NIR + RED)\n",
+        "NDVI = B8.subtract(B4).divide(B8.add(B4)).rename('NDVI')\n",
+        "\n",
+        "print(\"NDVI calculated successfully!\")\n",
+        ""
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "# Cell 8: Calculate EVI (Enhanced Vegetation Index)\n",
+        "# Formula: EVI = G * (NIR - RED) / (NIR + C1*RED - C2*BLUE + L)\n",
+        "# Where:\n",
+        "# G = 2.5 (gain factor)\n",
+        "# C1 = 6 (atmospheric resistance coefficient for red)\n",
+        "# C2 = 7.5 (atmospheric resistance coefficient for blue)\n",
+        "# L = 1 (canopy background adjustment)\n",
+        "\n",
+        "G = 2.5\n",
+        "C1 = 6.0\n",
+        "C2 = 7.5\n",
+        "L = 1.0\n",
+        "\n",
+        "numerator = B8.subtract(B4).multiply(G)\n",
+        "denominator = B8.add(B4.multiply(C1)).subtract(B2.multiply(C2)).add(L)\n",
+        "EVI = numerator.divide(denominator).rename('EVI')\n",
+        "\n",
+        "print(\"EVI calculated successfully!\")"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "# Cell 9: Calculate SAVI (Soil-Adjusted Vegetation Index)\n",
+        "# Formula: SAVI = ((NIR - RED) / (NIR + RED + L)) * (1 + L)\n",
+        "# Where L = 0.5 (soil brightness adjustment factor)\n",
+        "# Important: Bands must be scaled to 0-1 range (already done above)\n",
+        "\n",
+        "L_savi = 0.5\n",
+        "\n",
+        "numerator_savi = B8.subtract(B4)\n",
+        "denominator_savi = B8.add(B4).add(L_savi)\n",
+        "SAVI = numerator_savi.divide(denominator_savi).multiply(1 + L_savi).rename('SAVI')\n",
+        "\n",
+        "print(\"SAVI calculated successfully!\")\n",
+        ""
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "# Cell 10: Combine All Indices into Single Image\n",
+        "indices = NDVI.addBands(EVI).addBands(SAVI)\n",
+        "\n",
+        "print(\"All indices combined!\")\n",
+        "print(\"Bands available:\", indices.bandNames().getInfo())\n",
+        ""
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "# Cell 11: Visualize Indices (Optional)\n",
+        "# Create visualization parameters for each index\n",
+        "ndvi_vis = {'min': -0.2, 'max': 1, 'palette': ['red', 'yellow', 'green']}\n",
+        "evi_vis = {'min': -0.2, 'max': 1, 'palette': ['blue', 'white', 'green']}\n",
+        "savi_vis = {'min': -0.1, 'max': 1, 'palette': ['brown', 'yellow', 'green']}"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "# Create map and add layers\n",
+        "Map = geemap.Map()\n",
+        "Map.center_object(study_area, 9)\n",
+        "Map.add_ee_layer(NDVI, ndvi_vis, 'NDVI')\n",
+        "Map.add_ee_layer(EVI, evi_vis, 'EVI')\n",
+        "Map.add_ee_layer(SAVI, savi_vis, 'SAVI')\n",
+        ""
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        " # Cell 12: Calculate Zonal Statistics for Each Grid Cell\n",
+        "# Initialize list to store results\n",
+        "zonal_stats_list = []\n",
+        "\n",
+        "# Get number of grid cells\n",
+        "num_cells = len(grid_gdf)\n",
+        "\n",
+        "for idx, row in grid_gdf.iterrows():\n",
+        "    # Get grid cell geometry\n",
+        "    cell_geometry = ee.Geometry(row.geometry.__geo_interface__)\n",
+        "    \n",
+        "    # Reduce regions to get statistics\n",
+        "    try:\n",
+        "        # Calculate mean values for each index\n",
+        "        stats = indices.reduceRegion(\n",
+        "            reducer=ee.Reducer.mean(),\n",
+        "            geometry=cell_geometry,\n",
+        "            scale=10  # Sentinel-2 resolution is 10m\n",
+        "        ).getInfo()\n",
+        "        \n",
+        "        # Create result row\n",
+        "        result_row = {\n",
+        "            'grid_id': idx,\n",
+        "            'NDVI': stats.get('NDVI', None),\n",
+        "            'EVI': stats.get('EVI', None),\n",
+        "            'SAVI': stats.get('SAVI', None)\n",
+        "        }\n",
+        "        \n",
+        "        # Add any existing properties from the grid GeoDataFrame\n",
+        "        for col in grid_gdf.columns:\n",
+        "            if col != 'geometry' and col not in result_row:\n",
+        "                result_row[col] = row[col]\n",
+        "        \n",
+        "        zonal_stats_list.append(result_row)\n",
+        "        \n",
+        "        if (idx + 1) % 10 == 0:\n",
+        "            print(f\"Processed {idx + 1}/{num_cells} grid cells...\")\n",
+        "            \n",
+        "    except Exception as e:\n",
+        "        print(f\"Error processing grid cell {idx}: {str(e)}\")\n",
+        "        continue\n",
+        "\n",
+        "print(f\"\\nZonal statistics calculated for {len(zonal_stats_list)} grid cells!\")"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "# Cell 13: Create DataFrame and Save to CSV\n",
+        "# Convert results to DataFrame\n",
+        "results_df = pd.DataFrame(zonal_stats_list)"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "# Display first few rows\n",
+        "print(\"\\nFirst few rows of results:\")\n",
+        "print(results_df.head())\n",
+        ""
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "# Display summary statistics\n",
+        "print(\"\\nSummary statistics:\")\n",
+        "print(results_df[['NDVI', 'EVI', 'SAVI']].describe())"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "# Cell 14: Save to CSV\n",
+        "output_csv_path = '/Users/javiervaldes/Documents/2026/exercices/vegetation_indices_zonal_stats.csv'"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "results_df.to_csv(output_csv_path, index=False)"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "print(f\"\\nResults saved to: {output_csv_path}\")\n",
+        "print(f\"Total rows in output: {len(results_df)}\")"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "# Cell 15: Quality Check and Validation\n",
+        "# Check for any NaN values\n",
+        "nan_counts = results_df[['NDVI', 'EVI', 'SAVI']].isna().sum()\n",
+        "print(\"\\nMissing values per index:\")\n",
+        "print(nan_counts)"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "# Check data ranges (should be between -1 and 1)\n",
+        "print(\"\\nData ranges:\")\n",
+        "print(f\"NDVI - Min: {results_df['NDVI'].min():.4f}, Max: {results_df['NDVI'].max():.4f}\")\n",
+        "print(f\"EVI  - Min: {results_df['EVI'].min():.4f}, Max: {results_df['EVI'].max():.4f}\")\n",
+        "print(f\"SAVI - Min: {results_df['SAVI'].min():.4f}, Max: {results_df['SAVI'].max():.4f}\")\n",
+        ""
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        ""
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        ""
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        ""
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        ""
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        ""
+      ]
+    }
+  ],
+  "metadata": {
+    "kernelspec": {
+      "display_name": "Python 3",
+      "language": "python",
+      "name": "python3"
+    },
+    "language_info": {
+      "name": "python",
+      "version": "3.9"
+    }
+  },
+  "nbformat": 4,
+  "nbformat_minor": 5
+}
